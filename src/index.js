@@ -1,80 +1,430 @@
 import 'dotenv/config';
+
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import { buildBotResponse } from './botResponse.js';
 
 import Constants from '../node_modules/@liamcottle/meshcore.js/src/constants.js';
-import NodeJSSerialConnection from '../node_modules/@liamcottle/meshcore.js/src/connection/nodejs_serial_connection.js';
+import NodeJSSerialConnection
+    from '../node_modules/@liamcottle/meshcore.js/src/connection/nodejs_serial_connection.js';
 
-const port = process.env.MESHCORE_PORT ?? '/dev/ttyACM0';
-const logDir = process.env.LOG_DIR ?? './logs';
+const port =
+    process.env.MESHCORE_PORT ??
+    '/dev/ttyACM1';
+
+const logDir =
+    process.env.LOG_DIR ??
+    './logs';
+
+const botSendEnabled =
+    String(process.env.BOT_SEND_ENABLED).toLowerCase() === 'true';
+
+const botTrigger =
+    (process.env.BOT_TRIGGER ?? 'test').trim().toLowerCase();
 
 fs.mkdirSync(logDir, { recursive: true });
 
 const connection = new NodeJSSerialConnection(port);
 
+let channels = [];
+
+// Used to prevent responding twice to duplicate packets.
+const recentlyProcessed = new Map();
+
+function bytesToHex(bytes) {
+    return Array.from(bytes ?? [])
+        .map(byte => byte.toString(16).padStart(2, '0'))
+        .join('');
+}
+
+function logAdvert(advert) {
+    const record = {
+        receivedAt: new Date().toISOString(),
+
+        name: advert.advName ?? null,
+
+        publicKey: bytesToHex(advert.publicKey),
+
+        type: advert.type,
+        flags: advert.flags,
+
+        outPathLen: advert.outPathLen,
+        outPath: bytesToHex(
+            advert.outPath?.slice(
+                0,
+                Math.max(0, advert.outPathLen ?? 0)
+            )
+        ),
+
+        lastAdvert: advert.lastAdvert,
+        lastMod: advert.lastMod,
+
+        latRaw: advert.advLat,
+        lonRaw: advert.advLon,
+
+        raw: advert
+    };
+
+    console.log('\nNew advert:');
+    console.dir(record, { depth: null });
+
+    appendJsonLog(
+        'adverts.log',
+        record
+    );
+}
+
 function safeFilename(value) {
     return String(value)
+        .replace(/^#/, '')
         .replace(/[^a-z0-9_-]+/gi, '_')
         .toLowerCase();
 }
 
+function parseChannelText(rawText) {
+    const separator = rawText.indexOf(':');
+
+    if (separator === -1) {
+        return {
+            sender: null,
+            text: rawText.trim()
+        };
+    }
+
+    return {
+        sender: rawText.slice(0, separator).trim(),
+        text: rawText.slice(separator + 1).trim()
+    };
+}
+
+function decodePathLen(pathLen) {
+    if (pathLen === 0xff) {
+        return {
+            routing: 'direct',
+            hopCount: null,
+            hashSize: null
+        };
+    }
+
+    const hopCount = pathLen & 0x3f;
+    const hashSizeCode = (pathLen >> 6) & 0x03;
+
+    const hashSize =
+        hashSizeCode === 0 ? 1 :
+        hashSizeCode === 1 ? 2 :
+        hashSizeCode === 2 ? 3 :
+        null;
+
+    return {
+        routing: 'flood',
+        hopCount,
+        hashSize
+    };
+}
+
+function getChannelName(channelIdx) {
+    const channel = channels.find(
+        channel => channel.channelIdx === channelIdx
+    );
+
+    return channel?.name ?? `channel-${channelIdx}`;
+}
+
+function createDedupeId(message) {
+    return crypto
+        .createHash('sha256')
+        .update(
+            [
+                message.channelIdx,
+                message.senderTimestamp,
+                message.text
+            ].join('|')
+        )
+        .digest('hex')
+        .slice(0, 16);
+}
+
 function appendJsonLog(filename, data) {
-    const filepath = path.join(logDir, filename);
+    const filepath =
+        path.join(logDir, filename);
 
     fs.appendFileSync(
         filepath,
-        JSON.stringify({
-            loggedAt: new Date().toISOString(),
-            ...data,
-        }) + '\n'
+        JSON.stringify(data) + '\n'
     );
 }
 
+function logChannelMessage(channelName, data) {
+    appendJsonLog(
+        `${safeFilename(channelName)}.log`,
+        data
+    );
+}
+
+function logBotDecision(data) {
+    appendJsonLog(
+        'bot-responses.log',
+        data
+    );
+}
+
+function alreadyProcessed(dedupeId) {
+    const now = Date.now();
+
+    // Remove entries older than 10 minutes.
+    for (const [id, timestamp] of recentlyProcessed) {
+        if (now - timestamp > 10 * 60 * 1000) {
+            recentlyProcessed.delete(id);
+        }
+    }
+
+    if (recentlyProcessed.has(dedupeId)) {
+        return true;
+    }
+
+    recentlyProcessed.set(
+        dedupeId,
+        now
+    );
+
+    return false;
+}
+
+async function handleBotResponse(enriched) {
+    const response =
+        buildBotResponse(enriched);
+
+    if (!response) {
+        return;
+    }
+
+    const decision = {
+        timestamp: new Date().toISOString(),
+        channelIdx: enriched.channelIdx,
+        channel: enriched.channel,
+
+        sender: enriched.sender,
+        trigger: enriched.text,
+
+        response,
+
+        hopCount: enriched.hopCount,
+        snr: enriched.snr,
+
+        transmitted: botSendEnabled,
+
+        dedupeId: enriched.dedupeId
+    };
+
+    console.log('\nBOT RESPONSE:');
+    console.log(response);
+
+    if (!botSendEnabled) {
+        console.log(
+            'DRY RUN — not transmitted'
+        );
+
+        logBotDecision(decision);
+        return;
+    }
+
+    console.log(
+        `Sending response on ${enriched.channel}...`
+    );
+
+    await connection.sendChannelTextMessage(
+        enriched.channelIdx,
+        response
+    );
+
+    console.log('Response sent.');
+
+    logBotDecision(decision);
+}
+
 async function onChannelMessageReceived(message) {
-    console.log('Received channel message:');
-    console.dir(message, { depth: null });
+    const receivedAt = new Date();
 
-    // Until we confirm the exact field name, use whatever channel
-    // index-like value the message exposes.
-    const channel =
-        message.channelIdx ??
-        message.channelIndex ??
-        message.channel ??
-        'unknown';
+    const sentAt =
+        new Date(message.senderTimestamp * 1000);
 
-    const filename = `channel-${safeFilename(channel)}.log`;
+    const parsed =
+        parseChannelText(message.text);
 
-    appendJsonLog(filename, {
-        type: 'channel-message',
-        message,
-    });
+    const channelName =
+        getChannelName(message.channelIdx);
+
+    const pathInfo =
+        decodePathLen(message.pathLen);
+
+    const dedupeId =
+        createDedupeId(message);
+
+    const enriched = {
+        receivedAt:
+            receivedAt.toISOString(),
+
+        sentAt:
+            sentAt.toISOString(),
+
+        channelIdx:
+            message.channelIdx,
+
+        channel:
+            channelName,
+
+        sender:
+            parsed.sender,
+
+        text:
+            parsed.text,
+
+        rawText:
+            message.text,
+
+        snr:
+            message.snr,
+
+        routing:
+            pathInfo.routing,
+
+        hopCount:
+            pathInfo.hopCount,
+
+        pathHashSize:
+            pathInfo.hashSize,
+
+        pathLenRaw:
+            message.pathLen,
+
+        txtType:
+            message.txtType,
+
+        senderTimestamp:
+            message.senderTimestamp,
+
+        dedupeId,
+
+        raw:
+            message
+    };
+
+    console.log('\nReceived channel message:');
+
+    console.dir(
+        enriched,
+        { depth: null }
+    );
+
+    logChannelMessage(
+        channelName,
+        enriched
+    );
+
+    if (alreadyProcessed(dedupeId)) {
+        console.log(
+            'Duplicate packet — skipping bot processing'
+        );
+
+        return;
+    }
+
+    try {
+        await handleBotResponse(
+            enriched
+        );
+    } catch (error) {
+        console.error(
+            'Bot response error:',
+            error
+        );
+    }
 }
 
 connection.on('connected', async () => {
-    console.log(`Connected to MeshCore on ${port}`);
+    try {
+        console.log(
+            `Connected to MeshCore on ${port}`
+        );
 
-    // Keep the radio's clock synchronized.
-    await connection.syncDeviceTime();
+        await connection.syncDeviceTime();
 
-    console.log('Listening for channel messages...');
+        channels =
+            await connection.getChannels();
+
+        console.log('\nConfigured channels:');
+
+        channels
+            .filter(channel => channel.name)
+            .forEach(channel => {
+                console.log(
+                    `[${channel.channelIdx}] ${channel.name}`
+                );
+            });
+
+        console.log(
+            `\nBot send enabled: ${botSendEnabled}`
+        );
+
+        console.log(
+            `Bot trigger: "${botTrigger}"`
+        );
+
+        console.log(
+            '\nListening for channel messages...'
+        );
+
+    } catch (error) {
+        console.error(
+            'Startup error:',
+            error
+        );
+    }
 });
+
+connection.on(
+    Constants.PushCodes.MsgWaiting,
+    async () => {
+        try {
+            const waitingMessages =
+                await connection.getWaitingMessages();
+
+            for (const message of waitingMessages) {
+                if (message.channelMessage) {
+                    await onChannelMessageReceived(
+                        message.channelMessage
+                    );
+                }
+            }
+
+        } catch (error) {
+            console.error(
+                'Error reading waiting messages:',
+                error
+            );
+        }
+    }
+);
+
+connection.on(
+    Constants.PushCodes.NewAdvert,
+    advert => {
+        try {
+            logAdvert(advert);
+        } catch (error) {
+            console.error(
+                'Error logging advert:',
+                error
+            );
+        }
+    }
+);
 
 connection.on('disconnected', () => {
-    console.log('Disconnected from MeshCore');
-});
-
-connection.on(Constants.PushCodes.MsgWaiting, async () => {
-    try {
-        const waitingMessages = await connection.getWaitingMessages();
-
-        for (const message of waitingMessages) {
-            if (message.channelMessage) {
-                await onChannelMessageReceived(message.channelMessage);
-            }
-        }
-    } catch (error) {
-        console.error('Error reading waiting messages:', error);
-    }
+    console.log(
+        'Disconnected from MeshCore'
+    );
 });
 
 await connection.connect();

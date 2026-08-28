@@ -6,7 +6,8 @@
   "scripts": {
     "send": "node src/send.js",
     "start": "node src/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "trace": "node src/trace.js"
   },
   "keywords": [],
   "author": "",
