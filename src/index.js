@@ -23,6 +23,9 @@ const botSendEnabled =
 const botTrigger =
     (process.env.BOT_TRIGGER ?? 'test').trim().toLowerCase();
 
+const botMaxMessageAge =
+    Number(process.env.BOT_MAX_MESSAGE_AGE ?? 120);
+
 fs.mkdirSync(logDir, { recursive: true });
 
 const connection = new NodeJSSerialConnection(port);
@@ -151,7 +154,7 @@ function appendJsonLog(filename, data) {
 
     fs.appendFileSync(
         filepath,
-        JSON.stringify(data) + '\n'
+        formatLogJson(data) + '\n\n'
     );
 }
 
@@ -167,6 +170,63 @@ function logBotDecision(data) {
         'bot-responses.log',
         data
     );
+}
+
+function normalizeRawForLog(raw) {
+    if (!raw || typeof raw !== 'object') {
+        return raw;
+    }
+
+    const normalized = {
+        ...raw
+    };
+
+    if (normalized.publicKey) {
+        normalized.publicKey =
+            bytesToHex(normalized.publicKey);
+    }
+
+    if (normalized.outPath) {
+        normalized.outPath =
+            bytesToHex(normalized.outPath);
+    }
+
+    return normalized;
+}
+
+function formatLogJson(data) {
+    const normalized = {
+        ...data
+    };
+
+    let rawJson = null;
+
+    if (normalized.raw) {
+        rawJson = JSON.stringify(
+            normalizeRawForLog(
+                normalized.raw
+            )
+        );
+
+        normalized.raw =
+            '__RAW_OBJECT_PLACEHOLDER__';
+    }
+
+    let output =
+        JSON.stringify(
+            normalized,
+            null,
+            2
+        );
+
+    if (rawJson !== null) {
+        output = output.replace(
+            '"__RAW_OBJECT_PLACEHOLDER__"',
+            rawJson
+        );
+    }
+
+    return output;
 }
 
 function alreadyProcessed(dedupeId) {
@@ -191,6 +251,27 @@ function alreadyProcessed(dedupeId) {
     return false;
 }
 
+function getMessageAgeSeconds(message) {
+    const sentAtMs =
+        message.senderTimestamp * 1000;
+
+    return (
+        Date.now() - sentAtMs
+    ) / 1000;
+}
+
+function isMessageFresh(message) {
+    const ageSeconds =
+        getMessageAgeSeconds(message);
+
+    // Protect against bad/future timestamps too.
+    if (ageSeconds < 0) {
+        return false;
+    }
+
+    return ageSeconds <= botMaxMessageAge;
+}
+
 async function handleBotResponse(enriched) {
     const response =
         buildBotResponse(enriched);
@@ -201,6 +282,7 @@ async function handleBotResponse(enriched) {
 
     const decision = {
         timestamp: new Date().toISOString(),
+
         channelIdx: enriched.channelIdx,
         channel: enriched.channel,
 
@@ -261,12 +343,18 @@ async function onChannelMessageReceived(message) {
     const dedupeId =
         createDedupeId(message);
 
+    const messageAgeSeconds =
+        getMessageAgeSeconds(message);
+
     const enriched = {
         receivedAt:
             receivedAt.toISOString(),
 
         sentAt:
             sentAt.toISOString(),
+
+        messageAgeSeconds:
+            Math.round(messageAgeSeconds * 10) / 10,
 
         channelIdx:
             message.channelIdx,
@@ -317,6 +405,7 @@ async function onChannelMessageReceived(message) {
         { depth: null }
     );
 
+    // Always log channel traffic, even if it's old.
     logChannelMessage(
         channelName,
         enriched
@@ -325,6 +414,17 @@ async function onChannelMessageReceived(message) {
     if (alreadyProcessed(dedupeId)) {
         console.log(
             'Duplicate packet — skipping bot processing'
+        );
+
+        return;
+    }
+
+    // Important:
+    // queued/old messages still get logged,
+    // but the bot will not respond to them.
+    if (!isMessageFresh(message)) {
+        console.log(
+            `Old queued message (${Math.round(messageAgeSeconds)}s old) — skipping bot response`
         );
 
         return;
@@ -369,6 +469,10 @@ connection.on('connected', async () => {
 
         console.log(
             `Bot trigger: "${botTrigger}"`
+        );
+
+        console.log(
+            `Bot max message age: ${botMaxMessageAge} seconds`
         );
 
         console.log(
