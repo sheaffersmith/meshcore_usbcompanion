@@ -194,6 +194,199 @@ function normalizeRawForLog(raw) {
     return normalized;
 }
 
+function contactToLogRecord(contact) {
+    return {
+        capturedAt: new Date().toISOString(),
+
+        name: contact.advName ?? null,
+
+        publicKey: bytesToHex(contact.publicKey),
+
+        type: contact.type,
+        flags: contact.flags,
+
+        outPathLen: contact.outPathLen,
+
+        outPath: bytesToHex(
+            contact.outPath?.slice(
+                0,
+                Math.max(0, contact.outPathLen ?? 0)
+            )
+        ),
+
+        lastAdvert: contact.lastAdvert,
+        lastMod: contact.lastMod,
+
+        lat:
+            typeof contact.advLat === 'number'
+                ? contact.advLat / 1_000_000
+                : null,
+
+        lon:
+            typeof contact.advLon === 'number'
+                ? contact.advLon / 1_000_000
+                : null,
+
+        latRaw: contact.advLat,
+        lonRaw: contact.advLon
+    };
+}
+
+
+function loadKnownContacts() {
+    const filepath =
+        path.join(logDir, 'contacts.json');
+
+    if (!fs.existsSync(filepath)) {
+        return [];
+    }
+
+    try {
+        const content =
+            fs.readFileSync(filepath, 'utf8');
+
+        return JSON.parse(content);
+    } catch (error) {
+        console.error(
+            'Could not read contacts.json:',
+            error
+        );
+
+        return [];
+    }
+}
+
+function contactToRecord(contact, existing = null) {
+    const now =
+        new Date().toISOString();
+
+    const publicKey =
+        bytesToHex(contact.publicKey);
+
+    return {
+        name:
+            contact.advName ?? existing?.name ?? null,
+
+        publicKey,
+
+        type:
+            contact.type ?? existing?.type ?? null,
+
+        flags:
+            contact.flags ?? existing?.flags ?? null,
+
+        outPathLen:
+            contact.outPathLen ?? existing?.outPathLen ?? null,
+
+        outPath:
+            bytesToHex(
+                contact.outPath?.slice(
+                    0,
+                    Math.max(
+                        0,
+                        contact.outPathLen ?? 0
+                    )
+                )
+            ),
+
+        lastAdvert:
+            contact.lastAdvert ?? existing?.lastAdvert ?? null,
+
+        lastMod:
+            contact.lastMod ?? existing?.lastMod ?? null,
+
+        lat:
+            typeof contact.advLat === 'number'
+                ? contact.advLat / 1_000_000
+                : existing?.lat ?? null,
+
+        lon:
+            typeof contact.advLon === 'number'
+                ? contact.advLon / 1_000_000
+                : existing?.lon ?? null,
+
+        latRaw:
+            contact.advLat ?? existing?.latRaw ?? null,
+
+        lonRaw:
+            contact.advLon ?? existing?.lonRaw ?? null,
+
+        firstSeen:
+            existing?.firstSeen ?? now,
+
+        lastSeen:
+            now
+    };
+}
+
+function mergeContacts(currentContacts) {
+    const filepath =
+        path.join(logDir, 'contacts.json');
+
+    const knownContacts =
+        loadKnownContacts();
+
+    const byPublicKey =
+        new Map();
+
+    for (const contact of knownContacts) {
+        if (!contact.publicKey) {
+            continue;
+        }
+
+        byPublicKey.set(
+            contact.publicKey,
+            contact
+        );
+    }
+
+    for (const contact of currentContacts) {
+        const publicKey =
+            bytesToHex(contact.publicKey);
+
+        if (!publicKey) {
+            continue;
+        }
+
+        const existing =
+            byPublicKey.get(publicKey) ?? null;
+
+        const merged =
+            contactToRecord(
+                contact,
+                existing
+            );
+
+        byPublicKey.set(
+            publicKey,
+            merged
+        );
+    }
+
+    const records =
+        Array.from(
+            byPublicKey.values()
+        ).sort((a, b) => {
+            return String(a.name ?? '')
+                .localeCompare(
+                    String(b.name ?? '')
+                );
+        });
+
+    fs.writeFileSync(
+        filepath,
+        JSON.stringify(
+            records,
+            null,
+            2
+        ) + '\n'
+    );
+
+    console.log(
+        `Merged ${currentContacts.length} current contacts into ${records.length} total known contacts`
+    );
+}
+
 function formatLogJson(data) {
     const normalized = {
         ...data
@@ -452,6 +645,11 @@ connection.on('connected', async () => {
 
         channels =
             await connection.getChannels();
+
+        const contacts =
+            await connection.getContacts();
+
+        mergeContacts(contacts);
 
         console.log('\nConfigured channels:');
 
