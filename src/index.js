@@ -3,7 +3,7 @@ import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { buildBotResponse } from './botResponse.js';
+import {buildBotResponse, isBotTagged} from './botResponse.js';
 
 import Constants from '../node_modules/@liamcottle/meshcore.js/src/constants.js';
 import NodeJSSerialConnection
@@ -34,6 +34,13 @@ let channels = [];
 
 // Used to prevent responding twice to duplicate packets.
 const recentlyProcessed = new Map();
+
+function logTaggedMessage(data) {
+    appendJsonLog(
+        'tagged.log',
+        data
+    );
+}
 
 function bytesToHex(bytes) {
     return Array.from(bytes ?? [])
@@ -163,6 +170,23 @@ function logChannelMessage(channelName, data) {
         `${safeFilename(channelName)}.log`,
         data
     );
+}
+
+if (isBotTagged(enriched)) {
+    logTaggedMessage({
+        receivedAt: enriched.receivedAt,
+        sentAt: enriched.sentAt,
+        channelIdx: enriched.channelIdx,
+        channel: enriched.channel,
+        sender: enriched.sender,
+        text: enriched.text,
+        rawText: enriched.rawText,
+        snr: enriched.snr,
+        routing: enriched.routing,
+        hopCount: enriched.hopCount,
+        senderTimestamp: enriched.senderTimestamp,
+        dedupeId: enriched.dedupeId
+    });
 }
 
 function logBotDecision(data) {
@@ -467,7 +491,7 @@ function isMessageFresh(message) {
 
 async function handleBotResponse(enriched) {
     const response =
-        buildBotResponse(enriched);
+       await buildBotResponse(enriched);
 
     if (!response) {
         return;
