@@ -172,22 +172,6 @@ function logChannelMessage(channelName, data) {
     );
 }
 
-if (isBotTagged(enriched)) {
-    logTaggedMessage({
-        receivedAt: enriched.receivedAt,
-        sentAt: enriched.sentAt,
-        channelIdx: enriched.channelIdx,
-        channel: enriched.channel,
-        sender: enriched.sender,
-        text: enriched.text,
-        rawText: enriched.rawText,
-        snr: enriched.snr,
-        routing: enriched.routing,
-        hopCount: enriched.hopCount,
-        senderTimestamp: enriched.senderTimestamp,
-        dedupeId: enriched.dedupeId
-    });
-}
 
 function logBotDecision(data) {
     appendJsonLog(
@@ -627,6 +611,24 @@ async function onChannelMessageReceived(message) {
         channelName,
         enriched
     );
+
+
+if (isBotTagged(enriched)) {
+    logTaggedMessage({
+        receivedAt: enriched.receivedAt,
+        sentAt: enriched.sentAt,
+        channelIdx: enriched.channelIdx,
+        channel: enriched.channel,
+        sender: enriched.sender,
+        text: enriched.text,
+        rawText: enriched.rawText,
+        snr: enriched.snr,
+        routing: enriched.routing,
+        hopCount: enriched.hopCount,
+        senderTimestamp: enriched.senderTimestamp,
+        dedupeId: enriched.dedupeId
+    });
+}
 
     if (alreadyProcessed(dedupeId)) {
         console.log(
