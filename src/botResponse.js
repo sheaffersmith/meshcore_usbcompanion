@@ -53,32 +53,18 @@ export async function buildBotResponse(message) {
             .trim()
             .toLowerCase();
 
-    /*
-     * Was Pinehurst-MeshBot mentioned?
-     *
-     * Supports:
-     * @[Pinehurst-MeshBot]
-     * Pinehurst-MeshBot
-     */
-    const botWasTagged =
-        isBotTagged(message);
 
-  if (
-        botWasTagged &&
-        /\bjoke\b/.test(text)
-    ) {
+  const wantsJoke =
+    /#joke\b/.test(text);
+
+if (wantsJoke) {
+    try {
         const prefix =
             `@[${message.sender}] `;
 
-        /*
-         * MeshCore channel payload:
-         *
-         * 160 - bot advert name length - 2
-         *
-         * Leave a few extra bytes of safety margin.
-         */
         const botAdvertName =
-            process.env.BOT_NAME;
+            process.env.BOT_NAME ??
+            'Pinehurst-MeshBot';
 
         const meshCoreLimit =
             160 -
@@ -101,23 +87,22 @@ export async function buildBotResponse(message) {
             prefixBytes -
             safetyMargin;
 
-        try {
-            const joke =
-                await getCleanJoke(
-                    availableJokeBytes
-                );
-
-            return `${prefix}${joke}`;
-
-        } catch (error) {
-            console.error(
-                'Joke API error:',
-                error
+        const joke =
+            await getCleanJoke(
+                availableJokeBytes
             );
 
-            return `${prefix}Sorry, I couldn't find a short joke right now.`;
-        }
+        return `${prefix}${joke}`;
+
+    } catch (error) {
+        console.error(
+            'Joke API error:',
+            error
+        );
+
+        return `@[${message.sender}] Sorry, I couldn't find a short joke right now.`;
     }
+}
 
     /*
      * TEST / TESTING
@@ -128,7 +113,7 @@ export async function buildBotResponse(message) {
                 ? 'direct'
                 : `${message.hopCount} hop${message.hopCount === 1 ? '' : 's'}`;
 
-        return `@[${message.sender}] Heard you. ${hopText} to Arden, NC, SNR ${message.snr} dB. I respond to "test" in your messages or tag me and ask for a "joke". `;
+        return `@[${message.sender}] ${hopText} to Arden, NC. Cmds: #joke, test`;
     }
 
     return null;
