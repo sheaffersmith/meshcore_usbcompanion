@@ -526,6 +526,59 @@ async function handleBotResponse(enriched) {
     logBotDecision(decision);
 }
 
+async function onContactMessageReceived(message) {
+    const receivedAt = new Date();
+
+    const sentAt = message.senderTimestamp
+        ? new Date(message.senderTimestamp * 1000)
+        : null;
+
+    let contact = null;
+
+    try {
+        contact =
+            await connection.findContactByPublicKeyPrefix(
+                message.pubKeyPrefix
+            );
+    } catch (error) {
+        console.error(
+            'Could not resolve direct-message sender:',
+            error
+        );
+    }
+
+    const pathInfo = decodePathLen(message.pathLen);
+
+    const enriched = {
+        receivedAt: receivedAt.toISOString(),
+        sentAt: sentAt?.toISOString() ?? null,
+        sender:
+            contact?.advName ??
+            contact?.name ??
+            null,
+        publicKeyPrefix:
+            bytesToHex(message.pubKeyPrefix),
+        text: message.text ?? null,
+        snr: message.snr ?? null,
+        routing: pathInfo.routing,
+        hopCount: pathInfo.hopCount,
+        pathHashSize: pathInfo.hashSize,
+        pathLenRaw: message.pathLen ?? null,
+        txtType: message.txtType ?? null,
+        senderTimestamp:
+            message.senderTimestamp ?? null,
+        raw: message
+    };
+
+    console.log('\nReceived direct message:');
+    console.dir(enriched, { depth: null });
+
+    appendJsonLog(
+        'direct-messages.log',
+        enriched
+    );
+}
+
 async function onChannelMessageReceived(message) {
     const receivedAt = new Date();
 
@@ -719,7 +772,11 @@ connection.on(
                 await connection.getWaitingMessages();
 
             for (const message of waitingMessages) {
-                if (message.channelMessage) {
+                if (message.contactMessage) {
+                    await onContactMessageReceived(
+                        message.contactMessage
+                    );
+                } else if (message.channelMessage) {
                     await onChannelMessageReceived(
                         message.channelMessage
                     );
