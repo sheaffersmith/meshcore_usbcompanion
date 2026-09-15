@@ -35,13 +35,6 @@ let channels = [];
 // Used to prevent responding twice to duplicate packets.
 const recentlyProcessed = new Map();
 
-const selfInfo = await connection.getSelfInfo();
-
-console.log(
-    'USB companion public key:',
-    bytesToHex(selfInfo.publicKey)
-);
-
 function logTaggedMessage(data) {
     appendJsonLog(
         'tagged.log',
@@ -746,6 +739,13 @@ connection.on('connected', async () => {
                     `[${channel.channelIdx}] ${channel.name}`
                 );
             });
+
+        const selfInfo = await connection.getSelfInfo();
+
+        console.log(
+            'USB companion public key:',
+            bytesToHex(selfInfo.publicKey)
+        );
 
         console.log(
             `\nBot send enabled: ${botSendEnabled}`
