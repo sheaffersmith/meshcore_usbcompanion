@@ -35,6 +35,9 @@ const overwriteOldestContacts =
 const contactCapacity =
     Number(process.env.CONTACT_CAPACITY ?? 350);
 
+const manageContacts =
+    String(process.env.MANAGE_CONTACTS ?? 'true').toLowerCase() === 'true';
+
 const favoriteContactTokens =
     String(process.env.CONTACT_FAVORITES ?? 'smiths16')
         .split(',')
@@ -427,6 +430,10 @@ function mergeContacts(currentContacts) {
 }
 
 async function storeAdvertContact(advert) {
+    if (!manageContacts) {
+        return;
+    }
+
     const publicKey =
         bytesToHex(advert.publicKey);
 
@@ -888,6 +895,22 @@ connection.on('connected', async () => {
             bytesToHex(selfInfo.publicKey)
         );
 
+        console.log(
+            `USB companion contact mode: ${selfInfo.manualAddContacts ? 'manual/host-managed' : 'automatic/firmware-managed'}`
+        );
+
+        if (manageContacts && !selfInfo.manualAddContacts) {
+            console.log(
+                'Enabling host-managed contacts for overwrite-oldest support...'
+            );
+
+            await connection.setManualAddContacts();
+
+            console.log(
+                'Host-managed contacts enabled.'
+            );
+        }
+
         if (advertiseOnStart) {
             console.log(
                 'Sending USB companion flood advertisement...'
@@ -914,6 +937,10 @@ connection.on('connected', async () => {
 
         console.log(
             `Bot max message age: ${botMaxMessageAge} seconds`
+        );
+
+        console.log(
+            `Contact management: ${manageContacts ? 'enabled' : 'disabled'}`
         );
 
         console.log(
