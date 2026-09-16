@@ -26,6 +26,9 @@ const botTrigger =
 const botMaxMessageAge =
     Number(process.env.BOT_MAX_MESSAGE_AGE ?? 120);
 
+const advertiseOnStart =
+    String(process.env.ADVERTISE_ON_START ?? 'true').toLowerCase() === 'true';
+
 fs.mkdirSync(logDir, { recursive: true });
 
 const connection = new NodeJSSerialConnection(port);
@@ -746,6 +749,22 @@ connection.on('connected', async () => {
             'USB companion public key:',
             bytesToHex(selfInfo.publicKey)
         );
+
+        if (advertiseOnStart) {
+            console.log(
+                'Sending USB companion flood advertisement...'
+            );
+
+            await connection.sendFloodAdvert();
+
+            console.log(
+                'USB companion advertisement sent.'
+            );
+        } else {
+            console.log(
+                'USB companion startup advertisement disabled.'
+            );
+        }
 
         console.log(
             `\nBot send enabled: ${botSendEnabled}`
