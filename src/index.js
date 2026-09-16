@@ -29,11 +29,26 @@ const botMaxMessageAge =
 const advertiseOnStart =
     String(process.env.ADVERTISE_ON_START ?? 'true').toLowerCase() === 'true';
 
+const overwriteOldestContacts =
+    String(process.env.OVERWRITE_OLDEST_CONTACTS ?? 'true').toLowerCase() === 'true';
+
+const contactCapacity =
+    Number(process.env.CONTACT_CAPACITY ?? 350);
+
+const favoriteContactTokens =
+    String(process.env.CONTACT_FAVORITES ?? 'smiths16')
+        .split(',')
+        .map(value => value.trim().toLowerCase())
+        .filter(Boolean);
+
 fs.mkdirSync(logDir, { recursive: true });
 
 const connection = new NodeJSSerialConnection(port);
 
 let channels = [];
+
+// Serialise contact updates when several adverts arrive close together.
+let advertProcessingQueue = Promise.resolve();
 
 // Used to prevent responding twice to duplicate packets.
 const recentlyProcessed = new Map();
@@ -49,6 +64,19 @@ function bytesToHex(bytes) {
     return Array.from(bytes ?? [])
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
+}
+
+function isFavoriteContact(contact) {
+    const name =
+        String(contact.advName ?? contact.name ?? '')
+            .trim()
+            .toLowerCase();
+
+    const publicKey =
+        bytesToHex(contact.publicKey).toLowerCase();
+
+    return favoriteContactTokens.includes(name) ||
+        favoriteContactTokens.includes(publicKey);
 }
 
 function logAdvert(advert) {
@@ -395,6 +423,116 @@ function mergeContacts(currentContacts) {
 
     console.log(
         `Merged ${currentContacts.length} current contacts into ${records.length} total known contacts`
+    );
+}
+
+async function storeAdvertContact(advert) {
+    const publicKey =
+        bytesToHex(advert.publicKey);
+
+    let currentContacts =
+        await connection.getContacts();
+
+    const existingContact =
+        currentContacts.find(contact => {
+            return bytesToHex(contact.publicKey) === publicKey;
+        });
+
+    let removedContact = null;
+
+    if (!existingContact && currentContacts.length >= contactCapacity) {
+        if (!overwriteOldestContacts) {
+            const record = {
+                timestamp: new Date().toISOString(),
+                action: 'skipped-full',
+                capacity: contactCapacity,
+                incomingName: advert.advName ?? null,
+                incomingPublicKey: publicKey
+            };
+
+            console.log(
+                `Contact list full; skipped new contact ${advert.advName ?? publicKey}`
+            );
+
+            appendJsonLog(
+                'contact-management.log',
+                record
+            );
+
+            return;
+        }
+
+        const removableContacts =
+            currentContacts.filter(contact => {
+                return !isFavoriteContact(contact);
+            });
+
+        const oldestContact =
+            [...removableContacts].sort((a, b) => {
+                return (a.lastAdvert ?? 0) - (b.lastAdvert ?? 0);
+            })[0];
+
+        if (!oldestContact) {
+            throw new Error(
+                'Contact list is full but every contact is protected as a favorite'
+            );
+        }
+
+        removedContact = {
+            name: oldestContact.advName ?? null,
+            publicKey: bytesToHex(oldestContact.publicKey),
+            lastAdvert: oldestContact.lastAdvert ?? null
+        };
+
+        console.log(
+            `Contact list full; replacing oldest contact ${removedContact.name ?? removedContact.publicKey}`
+        );
+
+        await connection.removeContact(
+            oldestContact.publicKey
+        );
+    }
+
+    await connection.addOrUpdateContact(
+        advert.publicKey,
+        advert.type,
+        advert.flags,
+        advert.outPathLen,
+        advert.outPath,
+        advert.advName,
+        advert.lastAdvert,
+        advert.advLat,
+        advert.advLon
+    );
+
+    currentContacts =
+        await connection.getContacts();
+
+    mergeContacts(currentContacts);
+
+    const record = {
+        timestamp: new Date().toISOString(),
+        action:
+            existingContact
+                ? 'updated'
+                : removedContact
+                    ? 'replaced-oldest'
+                    : 'added',
+        capacity: contactCapacity,
+        contactCount: currentContacts.length,
+        incomingName: advert.advName ?? null,
+        incomingPublicKey: publicKey,
+        incomingFavorite: isFavoriteContact(advert),
+        removedContact
+    };
+
+    console.log(
+        `Stored advertised contact ${advert.advName ?? publicKey}`
+    );
+
+    appendJsonLog(
+        'contact-management.log',
+        record
     );
 }
 
@@ -823,6 +961,16 @@ connection.on(
     advert => {
         try {
             logAdvert(advert);
+
+            advertProcessingQueue =
+                advertProcessingQueue
+                    .then(() => storeAdvertContact(advert))
+                    .catch(error => {
+                        console.error(
+                            'Error storing advertised contact:',
+                            error
+                        );
+                    });
         } catch (error) {
             console.error(
                 'Error logging advert:',
