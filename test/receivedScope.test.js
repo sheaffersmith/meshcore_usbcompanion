@@ -83,3 +83,35 @@ test('decodes us-ga from a raw scoped channel packet', () => {
         '1|1789551900|smiths16: test'
     );
 });
+
+test('recognizes a raw channel packet as unscoped', () => {
+    const channel = {
+        channelIdx: 1,
+        name: '#test',
+        secret: Buffer.from('00112233445566778899aabbccddeeff', 'hex')
+    };
+
+    const scopedRaw = makeScopedPacket({
+        channel,
+        scopeName: 'us-ga',
+        timestamp: 1789570965,
+        rawText: 'Smiths16: Test'
+    });
+
+    // Change transport-flood (route 0) to ordinary flood (route 1) and
+    // remove the two 16-bit transport codes.
+    const unscopedRaw = Buffer.concat([
+        Buffer.from([scopedRaw[0] | 1]),
+        scopedRaw.subarray(5)
+    ]);
+
+    const decoded = decodeReceivedChannelScope(
+        {raw: unscopedRaw, lastSnr: 12, lastRssi: -80},
+        [channel],
+        getScopeCandidates()
+    );
+
+    assert.equal(decoded.transportScoped, false);
+    assert.equal(decoded.scopeName, null);
+    assert.equal(decoded.rawText, 'Smiths16: Test');
+});

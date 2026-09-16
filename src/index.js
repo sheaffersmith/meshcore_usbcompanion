@@ -240,6 +240,44 @@ function takeReceivedChannelScope(message) {
     return record;
 }
 
+function setFloodScopeUnscoped() {
+    return new Promise(async (resolve, reject) => {
+        const cleanup = () => {
+            connection.off(Constants.ResponseCodes.Ok, onOk);
+            connection.off(Constants.ResponseCodes.Err, onErr);
+        };
+
+        const onOk = response => {
+            cleanup();
+            resolve(response);
+        };
+
+        const onErr = response => {
+            cleanup();
+            reject(new Error(
+                `USB companion rejected unscoped flood mode${response?.errCode === null || response?.errCode === undefined ? '' : ` (error ${response.errCode})`}`
+            ));
+        };
+
+        connection.once(Constants.ResponseCodes.Ok, onOk);
+        connection.once(Constants.ResponseCodes.Err, onErr);
+
+        try {
+            // Companion protocol v12+: SET_FLOOD_SCOPE, variant 1 explicitly
+            // forces unscoped sending even when the radio has a default scope.
+            await connection.sendToRadioFrame(
+                new Uint8Array([
+                    Constants.CommandCodes.SetFloodScope,
+                    1
+                ])
+            );
+        } catch (error) {
+            cleanup();
+            reject(error);
+        }
+    });
+}
+
 function appendJsonLog(filename, data) {
     const filepath =
         path.join(logDir, filename);
@@ -694,7 +732,10 @@ async function handleBotResponse(enriched) {
         hopCount: enriched.hopCount,
         snr: enriched.snr,
 
-        receivedScope: enriched.scopeName,
+        receivedScope:
+            enriched.transportScoped
+                ? enriched.scopeName
+                : 'unscoped',
         transportScoped: enriched.transportScoped,
 
         transmitted: botSendEnabled,
@@ -726,19 +767,11 @@ async function handleBotResponse(enriched) {
         return;
     }
 
-    if (replyWithReceivedScope && !enriched.transportScoped) {
-        decision.transmitted = false;
-        decision.skipReason = 'received-message-was-unscoped';
-
-        console.log(
-            'Received message was unscoped — skipping because received-scope replies are enabled.'
-        );
-
-        logBotDecision(decision);
-        return;
-    }
-
-    if (replyWithReceivedScope && !enriched.scopeName) {
+    if (
+        replyWithReceivedScope &&
+        enriched.transportScoped &&
+        !enriched.scopeName
+    ) {
         decision.transmitted = false;
         decision.skipReason = 'received-scope-name-unknown';
 
@@ -756,11 +789,16 @@ async function handleBotResponse(enriched) {
 
     if (replyWithReceivedScope) {
         const sendTask = scopedSendQueue.then(async () => {
-            console.log(`Reply scope: ${enriched.scopeName}`);
+            if (enriched.transportScoped) {
+                console.log(`Reply scope: ${enriched.scopeName}`);
 
-            await connection.setFloodScope(
-                getRegionKey(enriched.scopeName)
-            );
+                await connection.setFloodScope(
+                    getRegionKey(enriched.scopeName)
+                );
+            } else {
+                console.log('Reply scope: unscoped');
+                await setFloodScopeUnscoped();
+            }
 
             try {
                 await connection.sendChannelTextMessage(
