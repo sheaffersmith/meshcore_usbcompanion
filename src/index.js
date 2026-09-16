@@ -4,6 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {buildBotResponse, isBotTagged} from './botResponse.js';
+import {
+    decodeReceivedChannelScope,
+    getRegionKey,
+    getScopeCandidates,
+    makeMessageScopeKey
+} from './receivedScope.js';
 
 import Constants from '../node_modules/@liamcottle/meshcore.js/src/constants.js';
 import NodeJSSerialConnection
@@ -38,6 +44,12 @@ const contactCapacity =
 const manageContacts =
     String(process.env.MANAGE_CONTACTS ?? 'true').toLowerCase() === 'true';
 
+const replyWithReceivedScope =
+    String(process.env.REPLY_WITH_RECEIVED_SCOPE ?? 'true').toLowerCase() === 'true';
+
+const scopeCandidates =
+    getScopeCandidates(process.env.REGION_SCOPES ?? '');
+
 const favoriteContactTokens =
     String(process.env.CONTACT_FAVORITES ?? 'smiths16')
         .split(',')
@@ -55,6 +67,14 @@ let advertProcessingQueue = Promise.resolve();
 
 // Used to prevent responding twice to duplicate packets.
 const recentlyProcessed = new Map();
+
+// Raw RX packets contain region transport codes, while the queued-message API
+// does not. Keep a short-lived correlation record until MsgWaiting is drained.
+const receivedChannelScopes = new Map();
+
+// setFloodScope is device state. Serialize set/send/clear transactions so two
+// replies received close together cannot use each other's scope.
+let scopedSendQueue = Promise.resolve();
 
 function logTaggedMessage(data) {
     appendJsonLog(
@@ -187,6 +207,37 @@ function createDedupeId(message) {
         )
         .digest('hex')
         .slice(0, 16);
+}
+
+function rememberReceivedChannelScope(scopeRecord) {
+    const now = Date.now();
+
+    for (const [key, record] of receivedChannelScopes) {
+        if (now - record.capturedAt > 10 * 60 * 1000) {
+            receivedChannelScopes.delete(key);
+        }
+    }
+
+    receivedChannelScopes.set(
+        makeMessageScopeKey(scopeRecord),
+        scopeRecord
+    );
+}
+
+function takeReceivedChannelScope(message) {
+    const key = makeMessageScopeKey({
+        channelIdx: message.channelIdx,
+        senderTimestamp: message.senderTimestamp,
+        rawText: message.text
+    });
+
+    const record = receivedChannelScopes.get(key) ?? null;
+
+    if (record) {
+        receivedChannelScopes.delete(key);
+    }
+
+    return record;
 }
 
 function appendJsonLog(filename, data) {
@@ -643,6 +694,9 @@ async function handleBotResponse(enriched) {
         hopCount: enriched.hopCount,
         snr: enriched.snr,
 
+        receivedScope: enriched.scopeName,
+        transportScoped: enriched.transportScoped,
+
         transmitted: botSendEnabled,
 
         dedupeId: enriched.dedupeId
@@ -660,14 +714,73 @@ async function handleBotResponse(enriched) {
         return;
     }
 
+    if (replyWithReceivedScope && !enriched.scopeCaptured) {
+        decision.transmitted = false;
+        decision.skipReason = 'received-scope-metadata-missing';
+
+        console.log(
+            'Scope metadata was not captured — skipping reply to avoid using the wrong scope.'
+        );
+
+        logBotDecision(decision);
+        return;
+    }
+
+    if (replyWithReceivedScope && !enriched.transportScoped) {
+        decision.transmitted = false;
+        decision.skipReason = 'received-message-was-unscoped';
+
+        console.log(
+            'Received message was unscoped — skipping because received-scope replies are enabled.'
+        );
+
+        logBotDecision(decision);
+        return;
+    }
+
+    if (replyWithReceivedScope && !enriched.scopeName) {
+        decision.transmitted = false;
+        decision.skipReason = 'received-scope-name-unknown';
+
+        console.log(
+            `Unknown received scope code ${enriched.transportCode1} — skipping reply instead of sending unscoped.`
+        );
+
+        logBotDecision(decision);
+        return;
+    }
+
     console.log(
         `Sending response on ${enriched.channel}...`
     );
 
-    await connection.sendChannelTextMessage(
-        enriched.channelIdx,
-        response
-    );
+    if (replyWithReceivedScope) {
+        const sendTask = scopedSendQueue.then(async () => {
+            console.log(`Reply scope: ${enriched.scopeName}`);
+
+            await connection.setFloodScope(
+                getRegionKey(enriched.scopeName)
+            );
+
+            try {
+                await connection.sendChannelTextMessage(
+                    enriched.channelIdx,
+                    response
+                );
+            } finally {
+                // Return to the radio's configured default scope immediately.
+                await connection.clearFloodScope();
+            }
+        });
+
+        scopedSendQueue = sendTask.catch(() => {});
+        await sendTask;
+    } else {
+        await connection.sendChannelTextMessage(
+            enriched.channelIdx,
+            response
+        );
+    }
 
     console.log('Response sent.');
 
@@ -748,6 +861,9 @@ async function onChannelMessageReceived(message) {
     const messageAgeSeconds =
         getMessageAgeSeconds(message);
 
+    const receivedScope =
+        takeReceivedChannelScope(message);
+
     const enriched = {
         receivedAt:
             receivedAt.toISOString(),
@@ -794,6 +910,21 @@ async function onChannelMessageReceived(message) {
         senderTimestamp:
             message.senderTimestamp,
 
+        scopeCaptured:
+            receivedScope !== null,
+
+        transportScoped:
+            receivedScope?.transportScoped ?? null,
+
+        scopeName:
+            receivedScope?.scopeName ?? null,
+
+        transportCode1:
+            receivedScope?.transportCode1 ?? null,
+
+        transportCode2:
+            receivedScope?.transportCode2 ?? null,
+
         dedupeId,
 
         raw:
@@ -806,6 +937,14 @@ async function onChannelMessageReceived(message) {
         enriched,
         { depth: null }
     );
+
+    if (receivedScope?.transportScoped) {
+        console.log(
+            `Received scope: ${receivedScope.scopeName ?? `unknown (${receivedScope.transportCode1})`}`
+        );
+    } else if (receivedScope) {
+        console.log('Received scope: unscoped');
+    }
 
     // Always log channel traffic, even if it's old.
     logChannelMessage(
@@ -944,6 +1083,16 @@ connection.on('connected', async () => {
         );
 
         console.log(
+            `Received-scope replies: ${replyWithReceivedScope ? 'enabled' : 'disabled'}`
+        );
+
+        if (replyWithReceivedScope) {
+            console.log(
+                `Known public region scopes: ${scopeCandidates.length}`
+            );
+        }
+
+        console.log(
             '\nListening for channel messages...'
         );
 
@@ -977,6 +1126,28 @@ connection.on(
         } catch (error) {
             console.error(
                 'Error reading waiting messages:',
+                error
+            );
+        }
+    }
+);
+
+connection.on(
+    Constants.PushCodes.LogRxData,
+    event => {
+        try {
+            const scopeRecord = decodeReceivedChannelScope(
+                event,
+                channels,
+                scopeCandidates
+            );
+
+            if (scopeRecord) {
+                rememberReceivedChannelScope(scopeRecord);
+            }
+        } catch (error) {
+            console.error(
+                'Error decoding received packet scope:',
                 error
             );
         }
