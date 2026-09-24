@@ -1037,7 +1037,7 @@ if (isBotTagged(enriched)) {
 
         try {
             await connection.sendTextMessage(
-                tagNotificationKey,
+                Buffer.from(tagNotificationKey, 'hex'),
                 notification
             );
             console.log('Tag notification sent to Smiths16.');
