@@ -44,6 +44,10 @@ export async function buildBotResponse(message) {
      * }
      */
 
+    if (Number(message?.channelIdx) === 0) {
+        return null;
+    }
+
     if (!message.sender || !message.text) {
         return null;
     }
