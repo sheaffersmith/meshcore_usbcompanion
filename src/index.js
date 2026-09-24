@@ -50,6 +50,9 @@ const replyWithReceivedScope =
 const scopeCandidates =
     getScopeCandidates(process.env.REGION_SCOPES ?? '');
 
+const tagNotificationKey =
+    '95dd033d4f41d60de13e7b6da653b8058d8c467767de6c934ae52cba6d69d95e';
+
 const favoriteContactTokens =
     String(process.env.CONTACT_FAVORITES ?? 'smiths16')
         .split(',')
@@ -1025,6 +1028,22 @@ if (isBotTagged(enriched)) {
         );
 
         return;
+    }
+
+    if (isBotTagged(enriched)) {
+        const notification =
+            `Bot tagged by ${enriched.sender ?? 'unknown'} ` +
+            `on ${enriched.channel}: ${enriched.text}`;
+
+        try {
+            await connection.sendTextMessage(
+                tagNotificationKey,
+                notification
+            );
+            console.log('Tag notification sent to Smiths16.');
+        } catch (error) {
+            console.error('Tag notification DM failed:', error);
+        }
     }
 
     try {
